@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Face AR (Phone)</title>
+<style>
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; background:#111; color:#fff; font-family:system-ui,sans-serif; }
+  body { display:flex; flex-direction:column; align-items:center; gap:12px;
+         padding:max(12px, env(safe-area-inset-top)) 12px max(12px, env(safe-area-inset-bottom)); }
+  #wrap { position:relative; width:100%; max-width:480px; flex:1; min-height:0; background:#222; border-radius:16px; overflow:hidden; }
+  video, canvas { position:absolute; inset:0; width:100%; height:100%; transform:scaleX(-1); object-fit:cover; }
+  #controls { display:flex; flex-wrap:wrap; gap:10px; justify-content:center; width:100%; max-width:480px; }
+  button { flex:1 1 140px; background:#4f8cff; color:#fff; border:0; padding:16px 12px; border-radius:12px; font-size:18px; font-weight:600; }
+  button.off { background:#444; }
+  #status { font-size:15px; text-align:center; opacity:.85; min-height:22px; }
+</style>
+</head>
+<body>
+  <div id="wrap"><video id="video" autoplay playsinline muted></video><canvas id="three"></canvas></div>
+  <div id="status">Tap "Start camera" and allow access. Your video stays on your phone.</div>
+  <div id="controls">
+    <button id="start">Start camera</button>
+    <button id="glassesBtn">Glasses: ON</button>
+    <button id="hatBtn">Hat: ON</button>
+  </div>
+
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { FaceLandmarker, FilesetResolver } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
+
+const video = document.getElementById('video');
+const canvas = document.getElementById('three');
+const statusEl = document.getElementById('status');
+const wrap = document.getElementById('wrap');
+
+// ---- 3D scene ----
+const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(63, 3 / 4, 0.1, 1000);
+scene.add(new THREE.AmbientLight(0xffffff, 1.2));
+const sun = new THREE.DirectionalLight(0xffffff, 1.5);
+sun.position.set(0, 20, 30);
+scene.add(sun);
+
+// This group follows your head (units: centimetres)
+const head = new THREE.Group();
+head.matrixAutoUpdate = false;
+head.visible = false;
+scene.add(head);
+
+const glasses = new THREE.Group();
+const frameMat = new THREE.MeshStandardMaterial({ color: 0x111111 });
+for (const x of [-3.2, 3.2]) {
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(2.4, 0.3, 12, 32), frameMat);
+  ring.position.set(x, 2.2, 6.5);
+  glasses.add(ring);
+}
+const bridge = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.25, 1.6, 8), frameMat);
+bridge.rotation.z = Math.PI / 2;
+bridge.position.set(0, 2.8, 6.5);
+glasses.add(bridge);
+head.add(glasses);
+
+const hat = new THREE.Mesh(
+  new THREE.ConeGeometry(5, 11, 24),
+  new THREE.MeshStandardMaterial({ color: 0xff4f8c })
+);
+hat.position.set(0, 14, 0);
+head.add(hat);
+
+function toggle(btnId, obj, label) {
+  const b = document.getElementById(btnId);
+  b.onclick = () => {
+    obj.visible = !obj.visible;
+    b.textContent = label + ': ' + (obj.visible ? 'ON' : 'OFF');
+    b.classList.toggle('off', !obj.visible);
+  };
+}
+toggle('glassesBtn', glasses, 'Glasses');
+toggle('hatBtn', hat, 'Hat');
+
+function resize() {
+  const w = wrap.clientWidth, h = wrap.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ---- Face tracking ----
+let landmarker, lastTime = -1;
+
+async function start() {
+  statusEl.textContent = 'Loading face tracker (first time takes a few seconds)...';
+  const fileset = await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+  landmarker = await FaceLandmarker.createFromOptions(fileset, {
+    baseOptions: {
+      modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task'
+    },
+    runningMode: 'VIDEO',
+    numFaces: 1,
+    outputFacialTransformationMatrixes: true,
+    outputFaceBlendshapes: true
+  });
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: 'user', width: { ideal: 480 }, height: { ideal: 640 } },
+    audio: false
+  });
+  video.srcObject = stream;
+  await video.play();
+  resize();
+  document.getElementById('start').style.display = 'none';
+  statusEl.textContent = 'Looking for your face...';
+  loop();
+}
+
+function loop() {
+  if (video.currentTime !== lastTime) {
+    lastTime = video.currentTime;
+    const result = landmarker.detectForVideo(video, performance.now());
+    if (result.facialTransformationMatrixes && result.facialTransformationMatrixes.length) {
+      head.matrix.fromArray(result.facialTransformationMatrixes[0].data);
+      head.visible = true;
+      const jaw = result.faceBlendshapes[0].categories.find(c => c.categoryName === 'jawOpen');
+      statusEl.textContent = 'Face found. Jaw open: ' + Math.round(jaw.score * 100) + '%';
+    } else {
+      head.visible = false;
+      statusEl.textContent = 'Looking for your face...';
+    }
+  }
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+document.getElementById('start').onclick = () => {
+  start().catch(err => { statusEl.textContent = 'Problem: ' + err.message; });
+};
+</script>
+</body>
+</html>
